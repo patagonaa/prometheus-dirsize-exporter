@@ -3,6 +3,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Serilog;
 
 namespace DirSizeExporter
 {
@@ -30,7 +31,11 @@ namespace DirSizeExporter
 
         private static void ConfigureLogging(HostBuilderContext hostContext, ILoggingBuilder loggingBuilder)
         {
-            loggingBuilder.AddConsole(c => c.IncludeScopes = false);
+            Log.Logger = new LoggerConfiguration()
+                .Enrich.FromLogContext()
+                .WriteTo.Console()
+                .CreateLogger();
+            loggingBuilder.AddSerilog(Log.Logger);
         }
 
         private static void ConfigureServices(HostBuilderContext hostContext, IServiceCollection services)

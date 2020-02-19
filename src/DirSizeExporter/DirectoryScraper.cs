@@ -5,7 +5,6 @@ using Microsoft.Extensions.Options;
 using System.Threading;
 using System.Threading.Tasks;
 using Timer = System.Timers.Timer;
-using ElapsedEventArgs = System.Timers.ElapsedEventArgs;
 using Prometheus;
 using System.IO;
 using System;
@@ -18,9 +17,8 @@ namespace DirSizeExporter
         private readonly ILogger<DirectoryScraper> _logger;
         private readonly Timer _timer;
 
-        private const int _maxRecursion = 50;
-
-        private static readonly Gauge _directorySize = Metrics.CreateGauge("dirsize_path_bytes", "Number of bytes of all files in the directory", "dirname");
+        private static readonly Gauge _directorySize = Metrics.CreateGauge("dirsize_path_bytes", "size of all files in the directory", "dirname", "basedir", "dirshortname");
+        private static readonly Gauge _directoryFileCount = Metrics.CreateGauge("dirsize_path_count", "number of files in the directory", "dirname", "basedir", "dirshortname");
         private static readonly Histogram _scrapeTime = Metrics.CreateHistogram("dirsize_scrape_time_ms", "Scrape duration", new HistogramConfiguration
         {
             Buckets = new double[] { 0.1, 1, 5, 10, 30, 60, 120, 300, 600 }
@@ -35,17 +33,18 @@ namespace DirSizeExporter
                 Interval = _config.IntervalSeconds * 1000,
                 AutoReset = true
             };
-            _timer.Elapsed += Scrape;
+            _timer.Elapsed += (sender, e) => Scrape();
         }
 
 
         public Task StartAsync(CancellationToken cancellationToken)
         {
             _timer.Start();
+            Scrape();
             return Task.CompletedTask;
         }
 
-        private void Scrape(object sender, ElapsedEventArgs e)
+        private void Scrape()
         {
             _logger.LogInformation("Scraping Directories.");
 
@@ -63,8 +62,6 @@ namespace DirSizeExporter
                         case DirectoryScrapeType.SubDirectories:
                             ScrapeSubDirectories(directoryConfig);
                             break;
-                        case DirectoryScrapeType.Recursive:
-                            throw new NotImplementedException();
                         default:
                             break;
                     }
@@ -75,52 +72,60 @@ namespace DirSizeExporter
 
         private void ScrapeTopDirectory(DirectoryConfiguration directoryConfig)
         {
-            var size = GetDirectorySize(directoryConfig.Path, _maxRecursion);
-            _directorySize.WithLabels(directoryConfig.Path).Set(size);
+            var (size, count) = GetDirectoryInfo(directoryConfig.Path);
+            _directorySize.WithLabels(GetLabels(directoryConfig.Path, DirectoryScrapeType.TopDirectory)).Set(size);
+            _directoryFileCount.WithLabels(GetLabels(directoryConfig.Path, DirectoryScrapeType.TopDirectory)).Set(count);
+            _logger.LogInformation("Scraped {FileCount} files in {DirectoryPath}", count, directoryConfig.Path);
         }
 
         private void ScrapeSubDirectories(DirectoryConfiguration directoryConfig)
         {
             foreach (var directory in Directory.EnumerateDirectories(directoryConfig.Path))
             {
-                var size = GetDirectorySize(directory, _maxRecursion);
-                _directorySize.WithLabels(directory).Set(size);
+                var (size, count) = GetDirectoryInfo(directory);
+                _directorySize.WithLabels(GetLabels(directory, DirectoryScrapeType.SubDirectories)).Set(size);
+                _directoryFileCount.WithLabels(GetLabels(directory, DirectoryScrapeType.SubDirectories)).Set(count);
+                _logger.LogInformation("Scraped {FileCount} files in {DirectoryPath}", count, directory);
             }
         }
 
-        private long GetDirectorySize(string directory, int remainingRecursion)
+        private string[] GetLabels(string path, DirectoryScrapeType scrapeType)
         {
-            if(remainingRecursion <= 0)
+            var directory = new DirectoryInfo(path);
+            string baseDir;
+            switch (scrapeType)
             {
-                _logger.LogWarning("Directory {DirectoryPath} is too deep", directory);
-                return 0;
+                case DirectoryScrapeType.TopDirectory:
+                    baseDir = directory.FullName;
+                    break;
+                case DirectoryScrapeType.SubDirectories:
+                    baseDir = directory.Parent?.FullName ?? directory.FullName;
+                    break;
+                default:
+                    throw new ArgumentException("Invalid ScrapeType");
             }
 
+            return new string[] { directory.FullName, baseDir, directory.Name };
+        }
+
+        private (long size, long count) GetDirectoryInfo(string directory)
+        {
             long size = 0;
-            foreach (var file in Directory.EnumerateFiles(directory))
+            long count = 0;
+            foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
             {
                 try
                 {
                     size += new FileInfo(file).Length;
+                    count++;
                 }
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Scrape failed for file {FilePath}", file);
                 }
             }
-            foreach (var subDirectory in Directory.EnumerateDirectories(directory))
-            {
-                try
-                {
-                    size += GetDirectorySize(subDirectory, remainingRecursion - 1);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Scrape failed for directory {DirectoryPath}", subDirectory);
-                }
-            }
 
-            return size;
+            return (size, count);
         }
 
         public Task StopAsync(CancellationToken cancellationToken)

@@ -3,7 +3,6 @@
     public enum DirectoryScrapeType
     {
         TopDirectory,
-        SubDirectories,
-        Recursive
+        SubDirectories
     }
 }
